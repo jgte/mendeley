@@ -23,6 +23,25 @@ module Utils
 
 end
 
+#https://stackoverflow.com/questions/170956/how-can-i-find-which-operating-system-my-ruby-program-is-running-on
+module OS
+  def OS.windows?
+    (/cygwin|mswin|mingw|bccwin|wince|emx/ =~ RUBY_PLATFORM) != nil
+  end
+
+  def OS.mac?
+   (/darwin/ =~ RUBY_PLATFORM) != nil
+  end
+
+  def OS.unix?
+    !OS.windows?
+  end
+
+  def OS.linux?
+    OS.unix? and not OS.mac?
+  end
+end
+
 module SQLite
 
   def SQLite.version
@@ -141,14 +160,14 @@ module SQLite
         caller unless changed.length==where.length
       #don't do anything with Mendeley open
       begin
-        `ps -eF | grep mendeley | grep -v grep`
-        mendeleyclosed=( $? != 0 )
+        out="Unknown OS"
+        out=`ps -eF | grep    mendeley | grep -v grep | grep -v mendeley.rb`.chomp if OS.linux?
+        out=`ps -e  | grep -i mendeley | grep -v grep | grep -v mendeley.rb`.chomp if OS.mac?
+        mendeleyclosed=( out.length == 0 )
         break if mendeleyclosed
-        puts "Mendeley is running, close it first.\nContinue? [Y/n]"
+        puts "Mendeley is running:\n#{out}\nClose it first.\nContinue? [Y/n]"
         exit if STDIN.gets.chomp.downcase == "n"
       end until mendeleyclosed
-      puts "needs debugging"
-        exit
       #unwrapping keys and values
       where_keys=where.keys
       where_values=where.values
@@ -184,7 +203,7 @@ module Mendeley
     attr_reader :extension
     attr_reader :hash
     PROTOCAL_SEP='://'
-    VALID_EXTENSION=["pdf","bin","ps","html"]
+    VALID_EXTENSION=["pdf","bin","ps","html","sh"]
     def initialize(url,hash)
       @localUrl=url
       tmp=URI.unescape(@localUrl).split(PROTOCAL_SEP)
@@ -271,7 +290,7 @@ module Mendeley
     files=`ls | egrep -v '(.pdf$|.ps$|.html$|.sh$|.rb$|^papers.sublime-*)'`.chomp.split("\n")
     unless files.empty?
       puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
-      puts `rm -fv #{files.join(" ")}` unless STDIN.gets.chomp.downcase == "n"
+      FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
     end
   end
 
@@ -283,6 +302,12 @@ module Mendeley
         Mendeley.rename(f,new_lu)
       end
     end
+    #invalid byte sequence in US-ASCII (Argument Error)
+    #put this in .profile:
+    # export LANG=en_US.UTF-8
+    # export LANGUAGE=en_US.UTF-8
+    # export LC_ALL=en_US.UTF-8
+    # https://stackoverflow.com/questions/17031651/invalid-byte-sequence-in-us-ascii-argument-error-when-i-run-rake-dbseed-in-ra
     files=`find . -name \\*\\([0-9]\\)\\*`.chomp.split("\n")
     unless files.empty?
       puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
@@ -306,6 +331,7 @@ module Mendeley
       puts "Compressing #{fin}:"
       #compress it
       com="gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/#{PDFSETTINGS_DEFAULT} -dNOPAUSE -dQUIET -dBATCH -sOutputFile=\"#{fout}\" \"#{fin}\""
+      puts com
       out=`#{com}`.chomp
       #check if succeeded
       if (File.exist?(fout) && $? == 0)
@@ -325,7 +351,7 @@ module Mendeley
   end
 
   def Mendeley.compress_filename(f)
-    f.sub('.pdf','.compressed.pdf')
+    f.sub('.pdf','-compressed.pdf')
   end
 
   def Mendeley.compress_gain(f)
@@ -364,7 +390,6 @@ module Mendeley
   end
 
 end
-
 
 Mendeley.fix_extension
 Mendeley.remove_parentheses
