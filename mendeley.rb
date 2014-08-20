@@ -42,6 +42,28 @@ module OS
   end
 end
 
+#https://stackoverflow.com/questions/7749568/how-can-i-do-standard-deviation-in-ruby
+module Enumerable
+  def sum
+    # self.inject(0){|accum, i| accum + i }
+    self.inject(:+)
+  end
+
+  def mean
+    self.sum/self.length.to_f
+  end
+
+  def sample_variance
+    m = self.mean
+    sum = self.inject(0){|accum, i| accum +(i-m)**2 }
+    sum/(self.length - 1).to_f
+  end
+
+  def std
+    return Math.sqrt(self.sample_variance)
+  end
+end
+
 module SQLite
 
   def SQLite.version
@@ -208,12 +230,22 @@ module Mendeley
       @localUrl=url
       tmp=URI.unescape(@localUrl).split(PROTOCAL_SEP)
       @protocol=tmp[0]
-      @dirname=File.dirname(tmp[1])
-      @basename=File.basename(tmp[1])
-      @extension=@basename.split('.')[-1]
-      @extension=nil unless VALID_EXTENSION.include?(@extension)
-      @basename=@basename.sub(/\.#{@extension}$/,'') unless @extension.nil?
-      @hash=hash
+      begin
+        @dirname=File.dirname(tmp[1])
+        @basename=File.basename(tmp[1])
+        @extension=@basename.split('.')[-1]
+        @extension=nil unless VALID_EXTENSION.include?(@extension)
+        @basename=@basename.sub(/\.#{@extension}$/,'') unless @extension.nil?
+      rescue
+        @dirname=''
+        @basename=''
+        @extension=nil
+      end
+      begin
+        @hash=hash
+      rescue
+        @hash=''
+      end
     end
     def to_s
       "hash     = #{@hash}\n" +
@@ -253,53 +285,60 @@ module Mendeley
     end
   end
 
-  def Mendeley.rename(old_lu,new_lu)
-    debug_flag=false
+  def Mendeley.rename(old_lu,new_lu,debug_flag=false)
     #sanity
     raise RuntimeError,"Mendeley.rename: hash must be the same in old and new localUrl (variable old_lu and new_lu).",
       caller unless old_lu.hash==new_lu.hash
     if File.exist?(old_lu.filename)
       begin
         Mendeley.debug("rename:\n#{old_lu.filename}\n#{new_lu.filename}",debug_flag) do
-          File.rename(old_lu.filename,new_lu.filename)
+          FileUtils.mv(old_lu.filename,new_lu.filename,{:force=>true,:verbose=>true})
         end
       rescue
-        raise RuntimeError,"Mendeley.rename: Could not rename #{old_lu.filename}.", caller
+        puts "WARNING: Mendeley.rename: Could not rename #{old_lu.filename}."
       end
       Mendeley.debug("update:#{old_lu.hash}\n#{old_lu.localUrl}\n#{new_lu.localUrl}",debug_flag) do
         DB.change("Files",{"hash" => old_lu.hash},{"localUrl" => new_lu.localUrl.gsub("'","''")})
       end
     else
-      raise RuntimeError,"Mendeley.fix_extension: Could not find file #{old_lu.filename}, cannot rename.", caller
+      msg="Mendeley.rename: Could not find file #{old_lu.filename}, cannot rename."
+      puts "ERROR:"+msg
+      # raise RuntimeError,msg, caller
     end
   end
 
   def Mendeley.fix_extension
+    debug_flag=false
     TableFiles.new(DB).each do |f|
       case
       when f.extension.nil?
         #add pdf extension if there is no extension
         new_lu=LocalUrl.new(f.localUrl+".pdf",f.hash)
-        Mendeley.rename(f,new_lu)
+        Mendeley.rename(f,new_lu,debug_flag)
       when f.extension == "bin"
         #replace bin extension with pdf
         new_lu=LocalUrl.new(f.localUrl.sub(/\.bin$/,".pdf"),f.hash)
-        Mendeley.rename(f,new_lu)
+        Mendeley.rename(f,new_lu,debug_flag)
       end
     end
     files=`ls | egrep -v '(.pdf$|.ps$|.html$|.sh$|.rb$|^papers.sublime-*)'`.chomp.split("\n")
-    unless files.empty?
-      puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
-      FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
+    if debug_flag
+      puts "The following files were going to be deleted if the debug flag was unsed:\n#{files.join("\n")}\nContinue? [Y/n]"
+    else
+      unless files.empty?
+        puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
+        FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
+      end
     end
   end
 
   def Mendeley.remove_parentheses
+    debug_flag=false
     TableFiles.new(DB).each do |f|
       if f.basename =~ /\(\d\)/
         #remove number between brackets
         new_lu=LocalUrl.new(f.localUrl.sub(/\(\d\)/,''),f.hash)
-        Mendeley.rename(f,new_lu)
+        Mendeley.rename(f,new_lu,debug_flag)
       end
     end
     #invalid byte sequence in US-ASCII (Argument Error)
@@ -309,9 +348,13 @@ module Mendeley
     # export LC_ALL=en_US.UTF-8
     # https://stackoverflow.com/questions/17031651/invalid-byte-sequence-in-us-ascii-argument-error-when-i-run-rake-dbseed-in-ra
     files=`find . -name \\*\\([0-9]\\)\\*`.chomp.split("\n")
-    unless files.empty?
-      puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
-      FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
+    if debug_flag
+      puts "The following files were going to be deleted if the debug flag was unsed:\n#{files.join("\n")}\nContinue? [Y/n]"
+    else
+      unless files.empty?
+        puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
+        FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
+      end
     end
   end
 
@@ -353,6 +396,9 @@ module Mendeley
   def Mendeley.compress_filename(f)
     f.sub('.pdf','-compressed.pdf')
   end
+  def Mendeley.uncompress_filename(f)
+    f.sub('-compressed.pdf','.pdf')
+  end
 
   def Mendeley.compress_gain(f)
     finsize =File.stat(f).size
@@ -375,10 +421,16 @@ module Mendeley
       #save size gain
       rec[fin]=Mendeley.compress_gain(fin)
     end
+    #compute the total space that can be saved
+    sizes=Hash.new
+    sizes[:all]=rec.map{ |file,size| size[0] if size[0]<0 }.compact
+    sizes[:sum]=sizes[:all].sum
+    sizes[:std]=sizes[:all].std
     #get the top-most space-saving compressions
     out=rec.sort_by{ |file,size| size }[0..9]
     #user feedback
-    puts "Delta".rjust(PADDING[0])+"Original".rjust(PADDING[1])+"Compressed".rjust(PADDING[2])+"   "+"Filename".ljust(PADDING[3])
+    puts "Potential total delta space: #{sizes[:sum]/1024/1024}Mb; std=#{"%.3f" % (sizes[:std]/1024)}Kb"
+    puts "Delta (Kb)".rjust(PADDING[0])+"Original".rjust(PADDING[1])+"Compressed".rjust(PADDING[2])+"   "+"Filename".ljust(PADDING[3])
     out.each do |o|
       puts  (o[1][0]/1024).to_s.rjust(PADDING[0])+
             (o[1][1]/1024).to_s.rjust(PADDING[1])+
@@ -393,8 +445,21 @@ end
 
 Mendeley.fix_extension
 Mendeley.remove_parentheses
-Mendeley.compress_pdf
-fdel=Mendeley.compressed_pdf_report
-puts "Delete #{fdel}? [Y/n]"
-exit 3 if STDIN.gets.chomp.downcase == "n"
-File.delete(fdel)
+puts "Compress PDFs (usually this is done only at one computer, since mendeley will download all PDFs, including compressed one, and rename them)? [Y/n]"
+unless STDIN.gets.chomp.downcase == "n"
+  Mendeley.compress_pdf
+  funcomp=Mendeley.compressed_pdf_report
+  puts "Delete #{funcomp}? [Y/n]"
+  if STDIN.gets.chomp.downcase == "n"
+    puts "Discard compressed version and keep uncompressed one (because it is already annotated)? [Y/n]"
+    if STDIN.gets.chomp.downcase == "n"
+      exit 3
+    else
+      fcomp=Mendeley.compress_filename(funcomp)
+      File.delete(fcomp)
+      `ln -sv "#{funcomp}" "#{fcomp}"`
+    end
+  else
+    File.delete(funcomp)
+  end
+end
