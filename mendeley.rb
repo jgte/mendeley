@@ -5,6 +5,7 @@ require 'pp'
 require 'yaml'
 require 'uri'
 require 'fileutils'
+require 'clipboard'
 
 #NOTICE: sqlite3 gem can (only?) be installed in ubuntu with 'sudo apt-get install libsqlite3-dev' and only then 'sudo gem install sqlite3'
 
@@ -449,17 +450,21 @@ puts "Compress PDFs (usually this is done only at one computer, since mendeley w
 unless STDIN.gets.chomp.downcase == "n"
   Mendeley.compress_pdf
   funcomp=Mendeley.compressed_pdf_report
+  fcomp=Mendeley.compress_filename(funcomp)
+  Clipboard.copy(funcomp.sub('.pdf',''))
   puts "Delete #{funcomp}? [Y/n]"
+  puts "(copied to clipboard: '#{Clipboard.paste}')"
   if STDIN.gets.chomp.downcase == "n"
     puts "Discard compressed version and keep uncompressed one (because it is already annotated)? [Y/n]"
     if STDIN.gets.chomp.downcase == "n"
       exit 3
     else
-      fcomp=Mendeley.compress_filename(funcomp)
       File.delete(fcomp)
       `ln -sv "#{funcomp}" "#{fcomp}"`
     end
   else
     File.delete(funcomp)
+    puts "Delete #{fcomp}? [y/N]"
+    File.delete(fcomp) if STDIN.gets.chomp.downcase == "y"
   end
 end
