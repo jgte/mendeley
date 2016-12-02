@@ -6,6 +6,8 @@ require 'yaml'
 require 'uri'
 require 'fileutils'
 require 'clipboard'
+require 'digest'
+require "i18n"
 
 #NOTICE: sqlite3 gem can (only?) be installed in ubuntu with 'sudo apt-get install libsqlite3-dev' and only then 'sudo gem install sqlite3'
 
@@ -20,6 +22,16 @@ module Utils
     else
       yield
     end
+  end
+
+  def Utils.clean_filename(f)
+    return f.
+      gsub(' ','\ ').
+      gsub('(','\(').
+      gsub(')','\)').
+      gsub(':','\:').
+      gsub('@','\@').
+      gsub("'","*")
   end
 
 end
@@ -214,9 +226,6 @@ end
 
 module Mendeley
 
-  FILENAME="../j.g.deteixeiradaencarnacao@tudelft.nl@www.mendeley.com.sqlite"
-
-  DB=SQLite::SQLdb.new(FILENAME)
 
   class LocalUrl
     attr_reader :localUrl
@@ -275,22 +284,59 @@ module Mendeley
     def each
       @list.each{|f| yield f}
     end
-  end
-
-  def Mendeley.debug(message,debug_flag)
-    raise RuntimeError,"Mendeley.debug: need a block. Debug needed!", caller unless block_given?
-    if debug_flag
-      puts message
-    else
-      yield
+    def find(hash)
+      @list.each do |f|
+        return f if f.hash==hash
+      end
+      return nil
     end
   end
 
-  def Mendeley.rename(old_lu,new_lu,debug_flag=false)
-    #sanity
-    raise RuntimeError,"Mendeley.rename: hash must be the same in old and new localUrl (variable old_lu and new_lu).",
-      caller unless old_lu.hash==new_lu.hash
-    if File.exist?(old_lu.filename)
+  class CompUncoPair
+    attr_reader :root
+    attr_reader :path
+    attr_reader :comp
+    attr_reader :unco
+    def CompUncoPair.get_details(filename,db)
+      if File.exist?(filename)
+        return {
+          :name => filename,
+          :size => File.stat(filename).size,
+          :added => ! db.find(Digest::SHA1.file(filename).hexdigest).nil?,
+          :exist => true,
+        }
+      else
+        return {
+          :name => filename,
+          :size => -1,
+          :added => false,
+          :exist => false,
+        }
+      end
+    end
+    def initialize(filename,db)
+      @root=File.basename(filename).sub(/.pdf$/i,'').sub(/-compressed$/i,'')
+      @path=File.dirname(filename)
+      @unco=CompUncoPair.get_details("#{@path}/#{root}.pdf",db)
+      @comp=CompUncoPair.get_details("#{@path}/#{root}-compressed.pdf",db)
+    end
+
+
+  end
+
+  def Mendeley.debug(message,debug_flag,always_show_msg=false)
+    raise RuntimeError,"Mendeley.debug: need a block. Debug needed!", caller unless block_given?
+    puts message if debug_flag || always_show_msg
+    yield unless debug_flag
+  end
+
+  def Mendeley.rename(old_lu,new_lu,debug_flag=false,rename_file=true,rename_mendeley=true)
+    if rename_file
+      #sanity
+      raise RuntimeError,"Mendeley.rename: hash must be the same in old and new localUrl (variable old_lu and new_lu).",
+        caller unless old_lu.hash==new_lu.hash
+      raise RuntimeError,"Mendeley.rename: Could not find file #{old_lu.filename}, cannot rename.",
+        caller unless File.exist?(old_lu.filename)
       begin
         Mendeley.debug("rename:\n#{old_lu.filename}\n#{new_lu.filename}",debug_flag) do
           FileUtils.mv(old_lu.filename,new_lu.filename,{:force=>true,:verbose=>true})
@@ -298,45 +344,42 @@ module Mendeley
       rescue
         puts "WARNING: Mendeley.rename: Could not rename #{old_lu.filename}."
       end
-      Mendeley.debug("update:#{old_lu.hash}\n#{old_lu.localUrl}\n#{new_lu.localUrl}",debug_flag) do
-        DB.change("Files",{"hash" => old_lu.hash},{"localUrl" => new_lu.localUrl.gsub("'","''")})
+    end
+    if rename_mendeley
+      Mendeley.debug("update:#{old_lu.hash}\n#{old_lu.localUrl}\n#{new_lu.localUrl}",debug_flag,true) do
+        DB.change("Files",{"hash" => new_lu.hash},{"localUrl" => new_lu.localUrl.gsub("'","''")})
       end
-    else
-      msg="Mendeley.rename: Could not find file #{old_lu.filename}, cannot rename."
-      puts "ERROR:"+msg
-      # raise RuntimeError,msg, caller
     end
   end
 
-  def Mendeley.fix_extension
-    debug_flag=false
+  def Mendeley.fix_extension(debug_flag)
     TableFiles.new(DB).each do |f|
-      case
-      when f.extension.nil?
+      case f.extension
+      when NilClass
         #add pdf extension if there is no extension
         new_lu=LocalUrl.new(f.localUrl+".pdf",f.hash)
         Mendeley.rename(f,new_lu,debug_flag)
-      when f.extension == "bin"
+      when "bin"
         #replace bin extension with pdf
         new_lu=LocalUrl.new(f.localUrl.sub(/\.bin$/,".pdf"),f.hash)
+        Mendeley.rename(f,new_lu,debug_flag)
+      when "pd"
+        #replace bin extension with pdf
+        new_lu=LocalUrl.new(f.localUrl.sub(/\.pd$/,".pdf"),f.hash)
         Mendeley.rename(f,new_lu,debug_flag)
       end
     end
     files=`ls | egrep -v '(.pdf$|.ps$|.html$|.sh$|.rb$|^papers.sublime-*)'`.chomp.split("\n")
-    if debug_flag
-      puts "The following files were going to be deleted if the debug flag was unsed:\n#{files.join("\n")}\nContinue? [Y/n]"
-    else
-      unless files.empty?
-        puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
-        FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
-      end
+    return if files.empty?
+    Mendeley.debug("The following files are going to be deleted:\n#{files.join("\n")}",debug_flag,true) do
+      puts "Continue? [Y/n]"
+      FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
     end
   end
 
-  def Mendeley.remove_parentheses
-    debug_flag=false
+  def Mendeley.remove_parentheses(debug_flag)
     TableFiles.new(DB).each do |f|
-      if f.basename =~ /\(\d\)/
+      if f.localUrl =~ /\(\d\)/
         #remove number between brackets
         new_lu=LocalUrl.new(f.localUrl.sub(/\(\d\)/,''),f.hash)
         Mendeley.rename(f,new_lu,debug_flag)
@@ -349,20 +392,18 @@ module Mendeley
     # export LC_ALL=en_US.UTF-8
     # https://stackoverflow.com/questions/17031651/invalid-byte-sequence-in-us-ascii-argument-error-when-i-run-rake-dbseed-in-ra
     files=`find . -name \\*\\([0-9]\\)\\*`.chomp.split("\n")
-    if debug_flag
-      puts "The following files were going to be deleted if the debug flag was unsed:\n#{files.join("\n")}\nContinue? [Y/n]"
-    else
-      unless files.empty?
-        puts "The following files are going to be deleted:\n#{files.join("\n")}\nContinue? [Y/n]"
-        FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
-      end
+    return if files.empty?
+    Mendeley.debug("The following files are going to be deleted:\n#{files.join("\n")}",debug_flag,true) do
+      puts "Continue? [Y/n]"
+      FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
     end
   end
 
   # screen ebook printer prepress default
   PDFSETTINGS_DEFAULT="ebook"
 
-  def Mendeley.compress_pdf
+  def Mendeley.compress_pdf(debug_flag)
+    files=Array.new
     #get list of PDFs
     Dir.glob("*.pdf",File::FNM_CASEFOLD) do |fin|
       #skip compressed PDFs
@@ -371,27 +412,32 @@ module Mendeley
       fout=Mendeley.compress_filename(fin)
       #skip if this PDF is already compressed
       next if File.exist?(fout)
-      #user feedback
-      puts "Compressing #{fin}:"
-      #compress it
-      com="gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/#{PDFSETTINGS_DEFAULT} -dNOPAUSE -dQUIET -dBATCH -sOutputFile=\"#{fout}\" \"#{fin}\""
-      puts com
-      out=`#{com}`.chomp
-      #check if succeeded
-      if (File.exist?(fout) && $? == 0)
-        #gather sizes of original and compressed PDFs
-        delta,finsize,foutsize=Mendeley.compress_gain(fin)
-        #user feedback
-        puts "Original  : #{finsize/1024}Kb\n" +
-             "Compressed: #{foutsize/1024}Kb (#{'%.2f' % (foutsize.to_f/finsize.to_f*100)}%)\n" +
-             "Gain      :#{delta/1024}Kb (#{'%.2f' % (delta.to_f/finsize.to_f*100)}%)"
-        #create empty file if compressed size is larger
-        File.open(fout, "w") {} if delta > 0
+      if debug_flag
+        files << fin
       else
-        #create empty file
-        File.open(fout, "w") {}
+        #user feedback
+        puts "Compressing #{fin}:"
+        #compress it
+        com="gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/#{PDFSETTINGS_DEFAULT} -dNOPAUSE -dQUIET -dBATCH -sOutputFile=\"#{fout}\" \"#{fin}\""
+        puts com
+        out=`#{com}`.chomp
+        #check if succeeded
+        if (File.exist?(fout) && $? == 0)
+          #gather sizes of original and compressed PDFs
+          delta,finsize,foutsize=Mendeley.compress_gain(fin)
+          #user feedback
+          puts "Original  : "+((finsize /1024).to_s+"Kb").rjust(8)+"\n" +
+               "Compressed: "+((foutsize/1024).to_s+"Kb").rjust(8)+", "+('%.2f' % (foutsize.to_f/finsize.to_f*100)+"%").rjust(8)+"\n" +
+               "Delta     : "+((delta   /1024).to_s+"Kb").rjust(8)+", "+('%.2f' % (   delta.to_f/finsize.to_f*100)+"%").rjust(8)
+          #create empty file if compressed size is larger
+          File.open(fout, "w") {} if delta > 0
+        else
+          #create empty file
+          File.open(fout, "w") {}
+        end
       end
     end
+    puts "The following files would have been compressed if the debug flag was unset:\n#{files.join("\n")}\n" if debug_flag && ! files.empty?
   end
 
   def Mendeley.compress_filename(f)
@@ -406,6 +452,165 @@ module Mendeley
     foutsize=File.stat(Mendeley.compress_filename(f)).size
     delta=foutsize-finsize
     return delta,finsize,foutsize
+  end
+
+  def Mendeley.operation_dialogue(f,op,reason,debug_flag)
+    case op
+    when :delete
+      op_str="Deleting"
+    when :zero
+      op_str="Zeroing"
+    else
+      raise RuntimeError,"Unknown op #{op}"
+    end
+    f_clean=f.sub(/.pdf$/i,'').sub(/-compressed$/i,'')
+    Clipboard.copy(f_clean)
+    system_list="System list is:\n"+`ls -la #{Utils.clean_filename(f_clean)}*`
+    Mendeley.debug(op_str+" the file below because "+reason+":\n"+f+"\n"+system_list,debug_flag,true) do
+      if ARGV.include?('force')
+        continue=true
+      else
+        puts "Continue? [Y/n]"
+        continue=(STDIN.gets.chomp.downcase != "n")
+      end
+      if continue
+        case op
+        when :delete
+          File.delete(f)
+        when :zero
+          File.open(f, "w") {}
+        end
+      end
+    end
+  end
+
+
+  #NOTICE: This is not working, possibly because cannot change hashes outside of mendeley
+  def Mendeley.switch_to_compressed_pdf(debug_flag)
+    TableFiles.new(DB).each do |f|
+      unless f.localUrl =~ /-compressed/
+        #save filenames
+        fn={
+          :comp => f.basename+"-compressed.pdf",
+          :unco => f.basename+".pdf"
+        }
+        #sanity
+        fn.each do |k,v|
+          raise RuntimeError,"Cannot find file #{v}" unless File.exist?(v)
+        end
+        #get file sizes
+        fs=Hash[fn.map{|k,v| [k,File.stat(v).size]}]
+        #do nothing if compressed PDF has non-zero size
+        if fs[:comp]==0
+          puts "Uncompressable: "+(fs[:unco]/1024).to_s.rjust(8)+"Kb "+fn[:unco] if debug_flag
+          next
+        end
+        #check if this is a bloated compressed file (should be cleaned at Mendeley.compress_pdf)
+        raise RuntimeError,"Bloated compressed file found:\n"+
+          "  Compressed: "+(fs[:comp]/1024).to_s.rjust(8)+"Kb "+fn[:comp]+"\n"+
+          "Uncompressed: "+(fs[:unco]/1024).to_s.rjust(8)+"Kb "+fn[:unco]+"\n" if fs[:unco]<fs[:comp]
+        #keep only one file if they are both of the same size
+        if fs[:unco]==fs[:comp]
+          #check what is in Mendeley
+          if f.localUrl=~/-compressed\.pdf$/i
+            # if it is the compressed one, delete the uncompressed
+            Mendeley.operation_dialogue(fn[:unco],:delete,reason="compressed already in Mendeley and is of the same size as uncompressed")
+          else
+            #if it's the uncompressed one, zero the compressed
+            Mendeley.operation_dialogue(fn[:comp],:zero,reason="compressed not added to Mendeley and is of the same size uncompressed")
+          end
+          #we're done for this one
+          next
+        end
+        #compute SHA1 of both files
+        fsha1=Hash[fn.map{|k,v| [k,Digest::SHA1.file(v).hexdigest]}]
+        #sanity on the hash algorithm used
+        raise RuntimeError,"Could not replicate SHA1 hash in Mendeley:\n"+
+        "File:          "+fn[:unco]+"\n"+
+        "Mendeley hash: "+f.hash+"\n"+
+        "SHA-1 hash:    "+fsha1[:unco]+"\n" unless fsha1[:unco]==f.hash
+        #build new LocalUrl
+        new_lu=LocalUrl.new(f.localUrl.sub(/\.pdf$/i,'-compressed.pdf'),fsha1[:comp])
+        #rename files in mendeley only (not the files on the hard disk)
+        Mendeley.rename(f,new_lu,debug_flag,rename_file=false)
+      end
+
+return
+
+    end
+  end
+
+  def Mendeley.clean_orphan_files(debug_flag,verbose_flag)
+    #inits
+    db=TableFiles.new(DB)
+    tab=24
+    #loop over all files
+    Dir.foreach('.') do |f|
+      #skip directories
+      if File.directory?(f)
+        reason='directory'
+        puts "Skipping: "+reason.rjust(tab)+": "+f if verbose_flag
+        next
+      end
+      #skip irrelevant files
+      skip=false
+      [".sh$",".rb$","^papers.sublime","^.DS"].each do |fp|
+        if f=~Regexp.new(fp)
+          skip=true
+          break
+        end
+      end
+      if skip
+        reason='irrelevant'
+        puts "Skipping: "+reason.rjust(tab)+": "+f if verbose_flag
+        next
+      end
+      #init object
+      cup=CompUncoPair.new(f,db)
+      #skip empty compressed files if uncompressed is in Mendeley
+      if cup.comp[:size]==0 && cup.unco[:added]
+        reason='cannot compress'
+        puts "Skipping: "+reason.rjust(tab)+": "+f if verbose_flag
+        next
+      end
+      #skip if uncompressed is smaller than compressed (compress not yet added to Mendeley)
+      if cup.comp[:size] < cup.unco[:size] && cup.comp[:size]>0
+        reason='compressed not yet added'
+        puts "Skipping: "+reason.rjust(tab)+": "+f if verbose_flag
+        next
+      end
+      #delete empty compressed file if there is no uncompressed in Mendeley
+      if cup.comp[:size]==0 && ! cup.unco[:added]
+        Mendeley.operation_dialogue(cup.comp[:name],:delete,reason="it is empty and there is no uncompressed version added to Mendeley",debug_flag)
+      end
+      #zero compressed if larger or equal to uncompressed
+      if cup.comp[:size] >= cup.unco[:size] && cup.unco[:size] > 0
+        Mendeley.operation_dialogue(cup.comp[:name],:zero,reason="it is larger than or equal to uncompressed",debug_flag)
+      end
+      #skip non-existing files
+      unless File.exist?(f)
+        reason='file disappeard'
+        puts "Skipping: "+reason.rjust(tab)+": "+f if verbose_flag
+        next
+      end
+      #look for this file in the mendeley database
+      fm=db.find(Digest::SHA1.file(f).hexdigest)
+      if fm.nil?
+        Mendeley.operation_dialogue(f,:delete,reason="it is not part of Mendeley",debug_flag)
+        next
+      end
+      #check if the filename matches (which is possible, if the files are the same except for the name)
+      I18n.config.available_locales = :en
+      fme=I18n.transliterate(File.basename(fm.filename)).gsub('?','')
+       fe=I18n.transliterate(f).gsub('?','')
+      if fme != fe
+        # a=fme
+        # puts "<#{a}>\nlength=#{a.length}\nbytesize=#{a.bytesize}\nencoding=#{a.encoding}\nascii=#{a.split('').map(&:ord)}"
+        # a=fe
+        # puts "<#{a}>\nlength=#{a.length}\nbytesize=#{a.bytesize}\nencoding=#{a.encoding}\nascii=#{a.split('').map(&:ord)}"
+        Mendeley.operation_dialogue(f,:delete,reason="this hash refers to file:\n#{File.basename(fm.filename)}\ninstead of file",debug_flag)
+      end
+    end
   end
 
   PADDING=[12,12,12,60]
@@ -444,11 +649,26 @@ module Mendeley
 
 end
 
-Mendeley.fix_extension
-Mendeley.remove_parentheses
+DATABASE="J.G.deTeixeiradaEncarnacao@tudelft.nl@www.mendeley.com.sqlite"
+
+if OS.linux?
+  FILENAME="#{ENV['HOME']}/.local/share/data/Mendeley Ltd./Mendeley Desktop/#{DATABASE}"
+elsif OS.mac?
+  FILENAME="#{ENV['HOME']}/Library/Application\ Support/Mendeley\ Desktop/#{DATABASE}"
+else
+  raise RuntimeError,"Cannot determine OS type"
+end
+
+DB=SQLite::SQLdb.new(FILENAME)
+
+debug_flag=ARGV.include?('debug')
+Mendeley.fix_extension(debug_flag)
+Mendeley.remove_parentheses(debug_flag)
+Mendeley.clean_orphan_files(debug_flag,ARGV.include?('verbose')) if ARGV.include?('orphans')
 puts "Compress PDFs (usually this is done only at one computer, since mendeley will download all PDFs, including compressed one, and rename them)? [Y/n]"
 unless STDIN.gets.chomp.downcase == "n"
-  Mendeley.compress_pdf
+  Mendeley.compress_pdf(debug_flag)
+  # Mendeley.switch_to_compressed_pdf(debug_flag)
   funcomp=Mendeley.compressed_pdf_report
   fcomp=Mendeley.compress_filename(funcomp)
   Clipboard.copy(funcomp.sub('.pdf',''))
@@ -460,7 +680,7 @@ unless STDIN.gets.chomp.downcase == "n"
       exit 3
     else
       File.delete(fcomp)
-      `ln -sv "#{funcomp}" "#{fcomp}"`
+      `touch "#{fcomp}"`
     end
   else
     File.delete(funcomp)
