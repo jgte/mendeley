@@ -5,7 +5,6 @@ require 'pp'
 require 'yaml'
 require 'uri'
 require 'fileutils'
-require 'clipboard'
 require 'digest'
 require "i18n"
 
@@ -357,7 +356,7 @@ module Mendeley
       @iscomp=COMPDB.include?(self) if @iscomp.nil?
     end
     def compname
-      self.tlname[:in]
+      self.tlname
     end
     def exist?
       @isexist=File.exist?(self.filename) if @isexist.nil?
@@ -374,23 +373,26 @@ module Mendeley
     def tlname
       if @tlname.nil?
         I18n.config.available_locales = :en
-        @tlname=Hash.new
-        @tlname[:db]=(self.added? ? I18n.transliterate(File.basename(self.dbentry.filename)).gsub('?','') : nil)
-        @tlname[:in]=I18n.transliterate(self.basename).gsub('?','')
+        begin
+          @tlname=I18n.transliterate(self.basename).gsub('?','')
+        rescue
+          @tlname=self.basename
+        end
       end
       @tlname
-    end
-    def equaldbname?
-      tlname=self.tlname
-      tlname[:db]==tlname[:in]
     end
     def url
       @url=FileDetails.filename2url(self.filename) if @url.nil?
       @url
     end
+    def baseurl
+      File.basename(self.url)
+    end
     def dbentry
       unless @dbentry_checked
-        @dbentry=MENDTBL.find({:basename=>self.basename})
+        @dbentry=MENDTBL.find({:hash    =>self.hash})
+        @dbentry=MENDTBL.find({:basename=>self.basename}) if @dbentry.nil?
+        @dbentry=MENDTBL.find({:baseurl =>self.baseurl} ) if @dbentry.nil?
         @isadded= ! @dbentry.nil?
         if @isadded
           @dbhash= @dbentry.hash
@@ -423,7 +425,7 @@ module Mendeley
       "size     : #{self.size}\n"+
       "hash     : #{self.hash}\n"+
       "tlname   : #{self.tlname}\n"+
-      # "dbentry  : #{self.dbentry}\n"+
+      "dbentry  : #{self.dbentry}\n"+
       "added?   : #{self.added?}\n"+
       "dbhash   : #{self.dbhash}\n"+
       "dburl    : #{self.dburl}\n"
@@ -449,20 +451,16 @@ module Mendeley
           return f if f.hash==args[:hash]
         end
       end
-      unless args[:url].nil?
-        @list.each do |f|
-          return f if f.url==args[:url]
-        end
-      end
-      unless args[:filename].nil?
-        @list.each do |f|
-          return f if f.filename==args[:filename]
-        end
-      end
       unless args[:basename].nil?
         @list.each do |f|
-          # puts "--\n"+f.basename+"\n"+args[:basename]
+          # puts "--\n"+f.basename+"\n"+args[:basename] if f.basename[0..5]==args[:basename][0..5]
           return f if f.basename==args[:basename]
+        end
+      end
+      unless args[:baseurl].nil?
+        @list.each do |f|
+          # puts "--\n"+File.basename(f.url)+"\n"+args[:baseurl] if File.basename(f.url)[0..5]==args[:baseurl][0..5]
+          return f if File.basename(f.url)==args[:baseurl]
         end
       end
       return nil
@@ -507,6 +505,16 @@ module Mendeley
   end
 
   def Mendeley.rename(f_old,f_new,rename_file=true,rename_mendeley=true)
+    msg="From #{f_old.filename}\nTo   #{f_new.filename}"
+    unless BATCH
+      m="Renaming"
+      m+=" files" if rename_file
+      m+=" and" if rename_file & rename_mendeley
+      m+=" DB" if rename_mendeley
+      m+=":\n"+msg+"\nContinue? [Y/n]"
+      puts m
+      return if STDIN.gets.chomp.downcase == "n"
+    end
     if rename_file
       #sanity
       raise RuntimeError,"Mendeley.rename: hash must be the same in old and new url (variable f_old and f_new).",
@@ -514,10 +522,7 @@ module Mendeley
       raise RuntimeError,"Mendeley.rename: Could not find file #{f_old.filename}, cannot rename.",
         caller unless f_old.exist?
       begin
-        Mendeley.debug(
-"rename file:
-From #{f_old.filename}
-To   #{f_new.filename}") do
+        Mendeley.debug("rename file:\n"+msg) do
           FileUtils.mv(f_old.filename,f_new.filename,{:force=>true,:verbose=>true})
         end
       rescue
@@ -525,22 +530,21 @@ To   #{f_new.filename}") do
       end
     end
     if rename_mendeley
-      Mendeley.debug(
-"rename DB:
-From : #{f_old.filename}
-To   : #{f_new.filename}",true) do
+      Mendeley.debug("rename DB:\n"+msg,true) do
         MENDDB.change("Files",{"hash" => f_new.hash},{"localUrl" => f_new.url.gsub("'","''")})
       end
     end
   end
 
   def Mendeley.rehash(f_old,f_new)
+    msg="From : #{f_old.hash} : #{f_old.filename}\nTo   : #{f_old.hash} : #{f_new.filename}"
+    unless BATCH
+      puts "rehashing:\n"+msg+"\nContinue? [Y/n]"
+      return if STDIN.gets.chomp.downcase == "n"
+    end
     raise RuntimeError,"Mendeley.rehash: name must be the same in old and new url (variable f_old and f_new).",
       caller unless f_old.filename==f_new.filename
-    Mendeley.debug(
-"rehash DB:
-From : #{f_old.hash} : #{f_old.filename}
-To   : #{f_old.hash} : #{f_new.filename}",true) do
+    Mendeley.debug("rehashing:\n"+msg,true) do
       MENDDB.change("Files",{"localUrl" => f_new.url.gsub("'","''")},{"hash" => f_new.hash})
     end
   end
@@ -576,21 +580,16 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
         #remove number between brackets
         f_new=FileDetails.new({:url=>f.url.sub(/\(\d\)/,''),:hash=>f.hash})
         #rename only if the un-parenthesised name is not present in the mendeley DB
-        Mendeley.rename(f,f_new) if MENDTBL.find({:url=>f_new.url}).nil?
+        next unless MENDTBL.find({:url=>f_new.url}).nil?
+        Mendeley.rename(f,f_new)
       end
     end
-    # #invalid byte sequence in US-ASCII (Argument Error)
-    # #put this in .profile:
-    # # export LANG=en_US.UTF-8
-    # # export LANGUAGE=en_US.UTF-8
-    # # export LC_ALL=en_US.UTF-8
-    # # https://stackoverflow.com/questions/17031651/invalid-byte-sequence-in-us-ascii-argument-error-when-i-run-rake-dbseed-in-ra
-    # files=`find . -name \\*\\([0-9]\\)\\*`.chomp.split("\n")
-    # return if files.empty?
-    # Mendeley.debug("The following files are going to be deleted:\n#{files.join("\n")}",true) do
-    #   puts "Continue? [Y/n]"
-    #   FileUtils.remove(files) unless STDIN.gets.chomp.downcase == "n"
-    # end
+    #invalid byte sequence in US-ASCII (Argument Error)
+    #put this in .profile:
+    # export LANG=en_US.UTF-8
+    # export LANGUAGE=en_US.UTF-8
+    # export LC_ALL=en_US.UTF-8
+    # https://stackoverflow.com/questions/17031651/invalid-byte-sequence-in-us-ascii-argument-error-when-i-run-rake-dbseed-in-ra
   end
 
   #NOTICE: This is not working, possibly because cannot change hashes outside of mendeley
@@ -613,17 +612,21 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
 
   def Mendeley.compress_pdf(fin)
     #skip compressed PDFs
-    return false if fin.comp?
+    return if fin.comp?
     #compressed filename
     fout="#{fin.filename}.compressed"
     #user feedback
-    puts "Compressing #{fin.basename}:"
+    puts "Compressing #{fin.basename}"
     #compress it
     com="gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/#{PDFSETTINGS_DEFAULT} -dNOPAUSE -dQUIET -dBATCH "+
       "-sOutputFile=\"#{fout}\" \"#{fin.filename}\""
     LibUtils.peek(com,'com',DEBUG)
+    unless BATCH
+      puts "Continue? [Y/n]"
+      return if STDIN.gets.chomp.downcase == "n"
+    end
     #if this is debug, we're done
-    return true if DRYRUN
+    return if DRYRUN
     #execute ghostscript call
     out=`#{com}`.chomp
     #check if succeeded
@@ -636,6 +639,7 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
            "Delta     : "+((delta   /1024).to_s+"Kb").rjust(8)+", "+('%.2f' % (   delta.to_f/finsize.to_f*100)+"%").rjust(8)
       #if compressed size is larger or only slightly smaller, then keep original
       if delta/1024 >= -10
+        puts "Keeping original, not enough or unfavorable gain"
         File.delete(fout)
       else
         #if compressed size is smaller, replace it in the mendelet DB
@@ -645,18 +649,14 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
       end
       #either way, add this file to the compressed DB
       COMPDB.add(fin).save
-      puts "Continue? [Y/n]"
-      exit if STDIN.gets.chomp.downcase == "n"
-      # we did it!
-      return true
-    else
-      return false
     end
   end
 
   def Mendeley.all_compress_pdf
     #get list of PDFs
-    Dir.glob("*.pdf",File::FNM_CASEFOLD).map{ |f| Mendeley.compress_pdf(FileDetails.new(:filename=>f)) }
+    Dir.glob("*.pdf",File::FNM_CASEFOLD).each do |f|
+      Mendeley.compress_pdf(FileDetails.new(:filename=>f))
+    end
   end
 
   def Mendeley.compress_gain(fin,fout)
@@ -675,22 +675,19 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
     else
       raise RuntimeError,"Unknown op #{op}"
     end
-    f_clean=f.sub(/.pdf$/i,'').sub(/-compressed$/i,'')
-    Clipboard.copy(f_clean)
-    system_list="System list is:\n"+`ls -la #{Utils.clean_filename(f_clean)}*`
-    Mendeley.debug(op_str+" the file below because "+reason+":\n"+f+"\n"+system_list,true) do
-      if ARGV.include?('force')
-        continue=true
-      else
+    Mendeley.debug(op_str+" the file below because "+reason+":\n"+f.filename+"\n",true) do
+      unless BATCH
         puts "Continue? [Y/n]"
         continue=(STDIN.gets.chomp.downcase != "n")
+      else
+        continue=true
       end
       if continue
         case op
         when :delete
-          File.delete(f)
+          File.delete(f.filename)
         when :zero
-          File.open(f, "w") {}
+          File.open(f.filename, "w") {}
         end
       end
     end
@@ -709,7 +706,7 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
       end
       #skip irrelevant files
       skip=false
-      [".sh$",".rb$","^papers.sublime","^.DS"].each do |fp|
+      [".sh$",".rb$","^papers.sublime","^.DS",".ruby-version",".txt$"].each do |fp|
         if f=~Regexp.new(fp)
           skip=true
           break
@@ -721,21 +718,18 @@ To   : #{f_old.hash} : #{f_new.filename}",true) do
         next
       end
       #init object
-      cup=FileDetails.new(f)
+      fd=FileDetails.new({:filename => f})
       #skip non-existing files
-      unless cup.exist?
+      unless fd.exist?
         reason='file disappeard'
         puts "Skipping: "+reason.rjust(tab)+": "+f if VERBOSE
         next
       end
       #look for this file in the mendeley database
-      if ! cup.added?
-        Mendeley.operation_dialogue(f,:delete,reason="it is not part of Mendeley")
+      if ! fd.added?
+        LibUtils.peek(fd,'fd',DEBUG)
+        Mendeley.operation_dialogue(fd,:delete,reason="it is not part of Mendeley")
         next
-      end
-      #check if the filename matches (which is possible, if the files are the same except for the name)
-      if ! cup.equaldbname?
-        Mendeley.operation_dialogue(f,:delete,reason="this hash refers to file:\n#{File.basename(fm.filename)}\ninstead of file")
       end
     end
   end
@@ -759,10 +753,11 @@ COMPDB=Mendeley::CompDB.new("compressed_files.txt")
 DRYRUN=ARGV.include?('dryrun') || ARGV.include?('dry-run')
 DEBUG=ARGV.include?('debug')
 VERBOSE=ARGV.include?('verbose')
+BATCH=ARGV.include?('batch')
 
-Mendeley.fix_extension
-Mendeley.remove_parenthesis
+Mendeley.fix_extension if ARGV.include?('extension')
+Mendeley.remove_parenthesis if ARGV.include?('parenthesis')
 Mendeley.clean_orphan_files if ARGV.include?('orphans')
-Mendeley.all_compress_pdf
-MENDDB.close
+Mendeley.all_compress_pdf if ARGV.include?('compress')
+
 
