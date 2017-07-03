@@ -93,14 +93,19 @@ module Utils
     end
   end
 
+  MAP={
+    ' ' => '\ ',
+    '(' => '\(',
+    ')' => '\)',
+    ':' => '\:',
+    '@' => '\@',
+    "'" => "*"
+  }
+  RE = Regexp.union(MAP.keys)
+
   def Utils.clean_filename(f)
-    return f.
-      gsub(' ','\ ').
-      gsub('(','\(').
-      gsub(')','\)').
-      gsub(':','\:').
-      gsub('@','\@').
-      gsub("'","*")
+    return f.gsub(RE,MAP)
+
   end
 
 end
@@ -313,8 +318,36 @@ module Mendeley
     attr_reader :dburl
     PROTOCAL_SEP='://'
     VALID_EXTENSION=["pdf","bin","ps","html","sh"]
+    FIND_VERBOSE_MATCH_LEN=4
+    MAP={
+      'e%CC%81' => '%C3%A9',
+      'u%CC%88' => '%C3%BC',
+      'A%CC%81' => '%C3%81',
+      'e%CC%8C' => '%C4%9B',
+      'c%CC%8C' => '%C4%8D',
+      'i%CC%81' => '%C3%AD',
+      'c%CC%81' => '%C4%87',
+      'z%CC%87' => '%C5%BC',
+      'n%CC%83' => '%C3%B1',
+      'a%CC%83' => '%C3%A3',
+      'n%CC%81' => '%C5%84',
+      'o%CC%88' => '%C3%B6',
+      'a%CC%81' => '%C3%A1',
+      'o%CC%80' => '%C3%B2',
+      's%CC%A7' => '%C5%9F',
+      'a%CC%88' => '%C3%A4',
+      'o%CC%81' => '%C3%B3',
+      'c%CC%A7' => '%C3%A7',
+      'S%CC%8C' => '%C5%A0',
+      'n%CC%8C' => '%C5%88',
+      'e%CC%88' => '%C3%AB',
+      'e%CC%80' => '%C3%A8',
+      's%CC%8C' => '%C5%A1',
+      's%CC%81' => '%C5%9B'
+    }
+    RE = Regexp.union(MAP.keys)
     def FileDetails.filename2url(filename,protocol="file")
-      protocol+PROTOCAL_SEP+URI.escape(filename)
+      protocol+PROTOCAL_SEP+URI.escape(filename).gsub(RE,MAP)
     end
     def FileDetails.url2filename(url)
       tmp=URI.unescape(url).split(PROTOCAL_SEP)
@@ -415,20 +448,24 @@ module Mendeley
       @dburl
     end
     def to_s
-      "\nname   : #{@name}\n"+
-      "basename : #{self.basename}\n"+
-      "dirname  : #{self.dirname}\n"+
-      "filename : #{self.filename}\n"+
-      "url      : #{self.url}\n"+
-      "comp?    : #{self.comp?}\n"+
-      "exist?   : #{self.exist?}\n"+
-      "size     : #{self.size}\n"+
-      "hash     : #{self.hash}\n"+
-      "tlname   : #{self.tlname}\n"+
-      "dbentry  : #{self.dbentry}\n"+
-      "added?   : #{self.added?}\n"+
-      "dbhash   : #{self.dbhash}\n"+
-      "dburl    : #{self.dburl}\n"
+      out=Array.new
+      begin out<<"name     : #{@name}"         rescue out<<"name     : ERROR" end
+      begin out<<"basename : #{self.basename}" rescue out<<"basename : ERROR" end
+      begin out<<"dirname  : #{self.dirname}"  rescue out<<"dirname  : ERROR" end
+      begin out<<"filename : #{self.filename}" rescue out<<"filename : ERROR" end
+      begin out<<"url      : #{self.url}"      rescue out<<"url      : ERROR" end
+      begin out<<"comp?    : #{self.comp?}"    rescue out<<"comp?    : ERROR" end
+      begin out<<"exist?   : #{self.exist?}"   rescue out<<"exist?   : ERROR" end
+      begin out<<"size     : #{self.size}"     rescue out<<"size     : ERROR" end
+      begin out<<"hash     : #{self.hash}"     rescue out<<"hash     : ERROR" end
+      begin out<<"tlname   : #{self.tlname}"   rescue out<<"tlname   : ERROR" end
+      if @dbentry_checked
+        begin out<<"dbentry  : #{self.dbentry}"  rescue out<<"dbentry  : ERROR" end
+        begin out<<"added?   : #{self.added?}"   rescue out<<"added?   : ERROR" end
+        begin out<<"dbhash   : #{self.dbhash}"   rescue out<<"dbhash   : ERROR" end
+        begin out<<"dburl    : #{self.dburl}"    rescue out<<"dburl    : ERROR" end
+      end
+      return out.join("\n")
     end
   end
 
@@ -445,22 +482,31 @@ module Mendeley
       @list.each{|f| yield f}
     end
     def find(args)
-      unless args[:hash].nil?
-        @list.each do |f|
-           # puts f.hash+' '+f.filename
-          return f if f.hash==args[:hash]
-        end
-      end
-      unless args[:basename].nil?
-        @list.each do |f|
-          # puts "--\n"+f.basename+"\n"+args[:basename] if f.basename[0..5]==args[:basename][0..5]
-          return f if f.basename==args[:basename]
-        end
-      end
-      unless args[:baseurl].nil?
-        @list.each do |f|
-          # puts "--\n"+File.basename(f.url)+"\n"+args[:baseurl] if File.basename(f.url)[0..5]==args[:baseurl][0..5]
-          return f if File.basename(f.url)==args[:baseurl]
+      @list.each do |f|
+        begin
+          unless args[:hash].nil?
+            if f.hash==args[:hash]
+              puts 'HASH     : now  : '+f.hash+' '+f.filename+"\n"+
+                   'HASH     : find : '+args[:hash]+"\n---" if VERBOSE
+              return f
+            end
+          end
+          unless args[:basename].nil?
+            if f.basename==args[:basename]
+              puts "BASENAME : now  : "+f.basename+"\n"+
+                   "BASENAME : find : "+args[:basename]+"\n---" if VERBOSE
+              return f
+            end
+          end
+          unless args[:baseurl].nil?
+            puts "BASEURL  : now  : "+File.basename(f.url)+"\n"+
+                 "BASEURL  : find : "+args[:baseurl]+"\n---" if
+              File.basename(f.url)[0..FileDetails::FIND_VERBOSE_MATCH_LEN]==
+                    args[:baseurl][0..FileDetails::FIND_VERBOSE_MATCH_LEN] && VERBOSE
+            return f if File.basename(f.url)==args[:baseurl]
+          end
+        rescue
+          raise "In calling the find method with arguments #{args}, cannot handle the following database entry:\n"+f.to_s
         end
       end
       return nil
@@ -470,6 +516,18 @@ module Mendeley
   class CompDB
     attr_reader :db
     attr_reader :filename
+    def CompDB.compressed_name(fin)
+      raise "Found non-PDF file: #{fin}." unless fin =~ /.pdf$/i
+      if fin =~ /.compressed.pdf$/i
+        fin
+      else
+        fin.sub(/.pdf$/i,'.compressed.pdf')
+      end
+    end
+    def CompDB.uncompressed_name(fin)
+      raise "Found non-PDF file: #{fin}." unless fin =~ /.pdf$/i
+      fin.sub(/.compressed.pdf$/i,'.pdf')
+    end
     def initialize(filename)
       @filename=filename
       if ! File.exist?(filename)
@@ -481,14 +539,14 @@ module Mendeley
       end
     end
     def include?(f)
-      @db.include?(f.compname)
+      @db.include?(CompDB.uncompressed_name(f.compname))
     end
     def add(f)
-      @db << f.compname
+      @db << CompDB.uncompressed_name(f.compname)
       return self
     end
     def remove(f)
-      @db.delete(f.compname)
+      @db.delete(CompDB.uncompressed_name(f.compname))
       return self
     end
     def save(filename=@filename)
@@ -614,7 +672,7 @@ module Mendeley
     #skip compressed PDFs
     return if fin.comp?
     #compressed filename
-    fout="#{fin.filename}.compressed"
+    fout=CompDB.compressed_name(fin.filename)
     #user feedback
     puts "Compressing #{fin.basename}"
     #compress it
@@ -639,13 +697,11 @@ module Mendeley
            "Delta     : "+((delta   /1024).to_s+"Kb").rjust(8)+", "+('%.2f' % (   delta.to_f/finsize.to_f*100)+"%").rjust(8)
       #if compressed size is larger or only slightly smaller, then keep original
       if delta/1024 >= -10
-        puts "Keeping original, not enough or unfavorable gain"
+        puts "Deleting compressed, not enough or unfavorable gain"
         File.delete(fout)
       else
-        #if compressed size is smaller, replace it in the mendelet DB
-        FileUtils.mv(fin.filename, fin.filename+".uncompressed",{:force=>true,:verbose=>false})
-        FileUtils.mv(fout,         fin.filename,                {:force=>true,:verbose=>false})
-        # Mendeley.switch_to_compressed_pdf(fin)
+        puts "Deleting original, sufficient gain"
+        File.delete(fin.filename)
       end
       #either way, add this file to the compressed DB
       COMPDB.add(fin).save
@@ -698,6 +754,7 @@ module Mendeley
     tab=24
     #loop over all files
     Dir.foreach('.') do |f|
+      next if f=~/^[a-r]/i
       #skip directories
       if File.directory?(f)
         reason='directory'
@@ -755,9 +812,9 @@ DEBUG=ARGV.include?('debug')
 VERBOSE=ARGV.include?('verbose')
 BATCH=ARGV.include?('batch')
 
-Mendeley.fix_extension if ARGV.include?('extension')
-Mendeley.remove_parenthesis if ARGV.include?('parenthesis')
-Mendeley.clean_orphan_files if ARGV.include?('orphans')
-Mendeley.all_compress_pdf if ARGV.include?('compress')
+Mendeley.fix_extension      if ARGV.include?('extension')   || ARGV.include?('all')
+Mendeley.clean_orphan_files if ARGV.include?('orphans')     || ARGV.include?('all')
+Mendeley.remove_parenthesis if ARGV.include?('parenthesis') || ARGV.include?('all')
+Mendeley.all_compress_pdf   if ARGV.include?('compress')    || ARGV.include?('all')
 
 
