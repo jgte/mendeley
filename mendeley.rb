@@ -7,6 +7,7 @@ require 'uri'
 require 'fileutils'
 require 'digest'
 require "i18n"
+require "clipboard"
 
 #NOTICE: sqlite3 gem can (only?) be installed in ubuntu with 'sudo apt-get install libsqlite3-dev' and only then 'sudo gem install sqlite3'
 
@@ -424,7 +425,11 @@ module Mendeley
     def dbentry
       unless @dbentry_checked
         @dbentry=MENDTBL.find({:hash    =>self.hash})
-        @dbentry=MENDTBL.find({:basename=>self.basename}) if @dbentry.nil?
+        if @dbentry.nil?
+          @dbentry=MENDTBL.find({:basename=>self.basename})
+        else
+          @dbentry=nil if MENDTBL.find({:basename=>self.basename}).nil?
+        end
         @dbentry=MENDTBL.find({:baseurl =>self.baseurl} ) if @dbentry.nil?
         @isadded= ! @dbentry.nil?
         if @isadded
@@ -534,7 +539,7 @@ module Mendeley
         @db=Array.new
       else
         #backup db
-        FileUtils.cp(filename,filename.sub('.txt','.'+Time.now.strftime("%Y%m%d-%H%M%S")+'.txt'))
+        #FileUtils.cp(filename,filename.sub('.txt','.'+Time.now.strftime("%Y%m%d-%H%M%S")+'.txt'))
         @db=File.open(filename, 'rb') { |f| f.read }.split("\n")
       end
     end
@@ -639,7 +644,11 @@ module Mendeley
         f_new=FileDetails.new({:url=>f.url.sub(/\(\d\)/,''),:hash=>f.hash})
         #rename only if the un-parenthesised name is not present in the mendeley DB
         next unless MENDTBL.find({:url=>f_new.url}).nil?
-        Mendeley.rename(f,f_new)
+        begin
+          Mendeley.rename(f,f_new)
+        rescue
+          Mendeley.rename(f,f_new,false,true)
+        end
       end
     end
     #invalid byte sequence in US-ASCII (Argument Error)
@@ -731,6 +740,7 @@ module Mendeley
     else
       raise RuntimeError,"Unknown op #{op}"
     end
+    Clipboard.copy(f.filename.split(' - ')[2].sub('.pdf',''))
     Mendeley.debug(op_str+" the file below because "+reason+":\n"+f.filename+"\n",true) do
       unless BATCH
         puts "Continue? [Y/n]"
@@ -754,7 +764,6 @@ module Mendeley
     tab=24
     #loop over all files
     Dir.foreach('.') do |f|
-      next if f=~/^[a-r]/i
       #skip directories
       if File.directory?(f)
         reason='directory'
@@ -787,6 +796,8 @@ module Mendeley
         LibUtils.peek(fd,'fd',DEBUG)
         Mendeley.operation_dialogue(fd,:delete,reason="it is not part of Mendeley")
         next
+      else
+        puts f
       end
     end
   end
@@ -816,5 +827,5 @@ Mendeley.fix_extension      if ARGV.include?('extension')   || ARGV.include?('al
 Mendeley.clean_orphan_files if ARGV.include?('orphans')     || ARGV.include?('all')
 Mendeley.remove_parenthesis if ARGV.include?('parenthesis') || ARGV.include?('all')
 Mendeley.all_compress_pdf   if ARGV.include?('compress')    || ARGV.include?('all')
-
+puts "Valid commands are:\n"+`grep ARGV.include? mendeley.rb | grep -v grep  | awk -F"('|')" '{print $2,$4}'`.gsub(/\n/,' ').split(' ').uniq.join("\n") if  ARGV.include?('help') || ARGV.empty?
 
